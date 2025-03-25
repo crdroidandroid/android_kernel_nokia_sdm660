@@ -106,7 +106,7 @@ struct apk_path_hash {
 	struct list_head list;
 };
 
-static struct list_head apk_path_hash_list = LIST_HEAD_INIT(apk_path_hash_list);
+static struct list_head apk_path_hash_list;
 
 struct my_dir_context {
 	struct dir_context ctx;
@@ -148,6 +148,12 @@ FILLDIR_RETURN_TYPE my_actor(struct dir_context *ctx, const char *name,
 	if (!strncmp(name, "..", namelen) || !strncmp(name, ".", namelen))
 		return FILLDIR_ACTOR_CONTINUE; // Skip "." and ".."
 
+	if (d_type == DT_DIR && namelen >= 8 && !strncmp(name, "vmdl", 4) &&
+	    !strncmp(name + namelen - 4, ".tmp", 4)) {
+		pr_info("Skipping directory: %.*s\n", namelen, name);
+		return FILLDIR_ACTOR_CONTINUE; // Skip staging package
+	}
+
 	if (snprintf(dirpath, DATA_PATH_LEN, "%s/%.*s", my_ctx->parent_dir,
 		     namelen, name) >= DATA_PATH_LEN) {
 		pr_err("Path too long: %s/%.*s\n", my_ctx->parent_dir, namelen,
@@ -169,7 +175,7 @@ FILLDIR_RETURN_TYPE my_actor(struct dir_context *ctx, const char *name,
 		list_add_tail(&data->list, my_ctx->data_path_list);
 	} else {
 		if ((namelen == 8) && (strncmp(name, "base.apk", namelen) == 0)) {
-			struct apk_path_hash *pos, *n;
+			struct apk_path_hash *pos;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
 			unsigned int hash = full_name_hash(dirpath, strlen(dirpath));
 #else
@@ -188,17 +194,6 @@ FILLDIR_RETURN_TYPE my_actor(struct dir_context *ctx, const char *name,
 			if (is_manager) {
 				crown_manager(dirpath, my_ctx->private_data);
 				*my_ctx->stop = 1;
-
-				// Manager found, clear APK cache list
-				list_for_each_entry_safe(pos, n, &apk_path_hash_list, list) {
-					list_del(&pos->list);
-					kfree(pos);
-				}
-			} else {
-				struct apk_path_hash *apk_data = kmalloc(sizeof(struct apk_path_hash), GFP_ATOMIC);
-				apk_data->hash = hash;
-				apk_data->exists = true;
-				list_add_tail(&apk_data->list, &apk_path_hash_list);
 			}
 		}
 	}
@@ -211,6 +206,7 @@ void search_manager(const char *path, int depth, struct list_head *uid_data)
 	int i, stop = 0;
 	struct list_head data_path_list;
 	INIT_LIST_HEAD(&data_path_list);
+	INIT_LIST_HEAD(&apk_path_hash_list);
 
 	// Initialize APK cache list
 	struct apk_path_hash *pos, *n;
@@ -240,25 +236,24 @@ void search_manager(const char *path, int depth, struct list_head *uid_data)
 				file = ksu_filp_open_compat(pos->dirpath, O_RDONLY | O_NOFOLLOW, 0);
 				if (IS_ERR(file)) {
 					pr_err("Failed to open directory: %s, err: %ld\n", pos->dirpath, PTR_ERR(file));
-					return;
+					goto skip_iterate;
 				}
 
 				iterate_dir(file, &ctx.ctx);
 				filp_close(file, NULL);
 			}
-
+skip_iterate:
 			list_del(&pos->list);
 			if (pos != &data)
 				kfree(pos);
 		}
 	}
 
-	// Remove stale cached APK entries
+	// clear apk_path_hash_list unconditionally
+	pr_info("search manager: cleanup!\n");
 	list_for_each_entry_safe(pos, n, &apk_path_hash_list, list) {
-		if (!pos->exists) {
-			list_del(&pos->list);
-			kfree(pos);
-		}
+		list_del(&pos->list);
+		kfree(pos);
 	}
 }
 
